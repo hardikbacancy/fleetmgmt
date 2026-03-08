@@ -1,11 +1,9 @@
-import { createClient } from '@/lib/supabase/server'
+import { getSession } from '@/lib/session'
 import { redirect } from 'next/navigation'
 
 export default async function RootPage() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
-  const role = user.user_metadata?.role
-  if (role === 'super_admin') redirect('/admin')
+  const session = await getSession()
+  if (!session) redirect('/login')
+  if (session.role === 'super_admin') redirect('/admin')
   redirect('/dashboard')
 }

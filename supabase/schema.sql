@@ -1,15 +1,55 @@
 -- ================================================================
--- FleetMgmt — Database Schema
+-- FleetMgmt — Database Schema (Custom Auth — no Supabase Auth)
 -- Run this FIRST in Supabase SQL Editor
 -- ================================================================
 
+-- Enable pgcrypto for password hashing
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- ----------------------------------------------------------------
--- Tables
+-- Auth / RBAC Tables
+-- ----------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS public.users (
+  id            UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
+  email         TEXT        NOT NULL UNIQUE,
+  password_hash TEXT        NOT NULL,
+  full_name     TEXT        NOT NULL,
+  created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.roles (
+  id   SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE   -- 'super_admin', 'fleet_owner', 'dispatcher'
+);
+
+CREATE TABLE IF NOT EXISTS public.permissions (
+  id   SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE
+  -- e.g. 'manage_fleet_owners', 'manage_vehicles', 'manage_drivers',
+  --      'manage_customers', 'manage_bookings', 'manage_trips',
+  --      'manage_expenses', 'view_reports'
+);
+
+CREATE TABLE IF NOT EXISTS public.role_permissions (
+  role_id       INTEGER REFERENCES public.roles(id) ON DELETE CASCADE,
+  permission_id INTEGER REFERENCES public.permissions(id) ON DELETE CASCADE,
+  PRIMARY KEY (role_id, permission_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.user_roles (
+  user_id UUID    REFERENCES public.users(id) ON DELETE CASCADE,
+  role_id INTEGER REFERENCES public.roles(id) ON DELETE CASCADE,
+  PRIMARY KEY (user_id, role_id)
+);
+
+-- ----------------------------------------------------------------
+-- Fleet Tables
 -- ----------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS public.fleet_owners (
   id           UUID        DEFAULT gen_random_uuid() PRIMARY KEY,
-  user_id      UUID        REFERENCES auth.users(id) ON DELETE CASCADE,
+  user_id      UUID        REFERENCES public.users(id) ON DELETE CASCADE,
   company_name TEXT        NOT NULL,
   phone        TEXT        NOT NULL,
   address      TEXT,
@@ -19,7 +59,7 @@ CREATE TABLE IF NOT EXISTS public.fleet_owners (
 );
 
 CREATE TABLE IF NOT EXISTS public.profiles (
-  id             UUID        PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  id             UUID        PRIMARY KEY REFERENCES public.users(id) ON DELETE CASCADE,
   email          TEXT        NOT NULL,
   full_name      TEXT        NOT NULL,
   role           TEXT        NOT NULL CHECK (role IN ('super_admin', 'fleet_owner', 'dispatcher')),
@@ -119,60 +159,65 @@ CREATE TABLE IF NOT EXISTS public.expenses (
 -- Indexes
 -- ----------------------------------------------------------------
 
-CREATE INDEX IF NOT EXISTS idx_vehicles_fleet_owner ON public.vehicles(fleet_owner_id);
-CREATE INDEX IF NOT EXISTS idx_drivers_fleet_owner  ON public.drivers(fleet_owner_id);
+CREATE INDEX IF NOT EXISTS idx_vehicles_fleet_owner  ON public.vehicles(fleet_owner_id);
+CREATE INDEX IF NOT EXISTS idx_drivers_fleet_owner   ON public.drivers(fleet_owner_id);
 CREATE INDEX IF NOT EXISTS idx_customers_fleet_owner ON public.customers(fleet_owner_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_fleet_owner  ON public.bookings(fleet_owner_id);
 CREATE INDEX IF NOT EXISTS idx_bookings_pickup       ON public.bookings(pickup_datetime DESC);
 CREATE INDEX IF NOT EXISTS idx_trips_fleet_owner     ON public.trips(fleet_owner_id);
 CREATE INDEX IF NOT EXISTS idx_trips_started_at      ON public.trips(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_expenses_fleet_owner  ON public.expenses(fleet_owner_id);
+CREATE INDEX IF NOT EXISTS idx_user_roles_user       ON public.user_roles(user_id);
 
 -- ----------------------------------------------------------------
--- Row Level Security
+-- DB function: authenticate_user
+-- Called from login action — returns profile info if creds valid
 -- ----------------------------------------------------------------
 
-ALTER TABLE public.fleet_owners ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.profiles     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.vehicles     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.drivers      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.customers    ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.bookings     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.trips        ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.expenses     ENABLE ROW LEVEL SECURITY;
-
--- Helper functions (SECURITY DEFINER — bypass RLS for lookups)
-CREATE OR REPLACE FUNCTION public.get_my_fleet_owner_id()
-RETURNS UUID LANGUAGE SQL SECURITY DEFINER STABLE AS $$
-  SELECT fleet_owner_id FROM public.profiles WHERE id = auth.uid()
+CREATE OR REPLACE FUNCTION public.authenticate_user(p_email TEXT, p_password TEXT)
+RETURNS TABLE(
+  id             UUID,
+  email          TEXT,
+  full_name      TEXT,
+  role           TEXT,
+  fleet_owner_id UUID
+)
+LANGUAGE SQL SECURITY DEFINER STABLE AS $$
+  SELECT u.id, u.email, u.full_name, p.role, p.fleet_owner_id
+  FROM public.users u
+  JOIN public.profiles p ON p.id = u.id
+  WHERE u.email = p_email
+    AND u.password_hash = crypt(p_password, u.password_hash)
 $$;
 
-CREATE OR REPLACE FUNCTION public.is_super_admin()
-RETURNS BOOLEAN LANGUAGE SQL SECURITY DEFINER STABLE AS $$
-  SELECT EXISTS (SELECT 1 FROM public.profiles WHERE id = auth.uid() AND role = 'super_admin')
+-- ----------------------------------------------------------------
+-- DB function: get user permissions
+-- ----------------------------------------------------------------
+
+CREATE OR REPLACE FUNCTION public.get_user_permissions(p_user_id UUID)
+RETURNS TEXT[]
+LANGUAGE SQL SECURITY DEFINER STABLE AS $$
+  SELECT ARRAY_AGG(DISTINCT perm.name)
+  FROM public.user_roles ur
+  JOIN public.role_permissions rp ON rp.role_id = ur.role_id
+  JOIN public.permissions perm ON perm.id = rp.permission_id
+  WHERE ur.user_id = p_user_id
 $$;
 
--- profiles
-CREATE POLICY "profiles_select" ON public.profiles FOR SELECT
-  USING (id = auth.uid() OR public.is_super_admin());
-CREATE POLICY "profiles_insert" ON public.profiles FOR INSERT WITH CHECK (true);
-CREATE POLICY "profiles_update" ON public.profiles FOR UPDATE USING (id = auth.uid());
+-- ----------------------------------------------------------------
+-- Disable RLS (auth is handled in application layer)
+-- ----------------------------------------------------------------
 
--- fleet_owners
-CREATE POLICY "fleet_owners_select_own"   ON public.fleet_owners FOR SELECT
-  USING (id = public.get_my_fleet_owner_id() OR public.is_super_admin());
-CREATE POLICY "fleet_owners_insert"       ON public.fleet_owners FOR INSERT WITH CHECK (true);
-CREATE POLICY "fleet_owners_update_admin" ON public.fleet_owners FOR UPDATE
-  USING (public.is_super_admin() OR id = public.get_my_fleet_owner_id());
-
--- Fleet data tables — scoped to fleet_owner_id
-DO $$ DECLARE t TEXT; BEGIN
-  FOREACH t IN ARRAY ARRAY['vehicles','drivers','customers','bookings','trips','expenses'] LOOP
-    EXECUTE format(
-      'CREATE POLICY %I ON public.%I FOR ALL
-       USING (fleet_owner_id = public.get_my_fleet_owner_id() OR public.is_super_admin())
-       WITH CHECK (fleet_owner_id = public.get_my_fleet_owner_id() OR public.is_super_admin())',
-      t || '_policy', t
-    );
-  END LOOP;
-END $$;
+ALTER TABLE public.users          DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.roles          DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.permissions    DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.role_permissions DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.user_roles     DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.fleet_owners   DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.profiles       DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.vehicles       DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.drivers        DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.customers      DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.bookings       DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.trips          DISABLE ROW LEVEL SECURITY;
+ALTER TABLE public.expenses       DISABLE ROW LEVEL SECURITY;

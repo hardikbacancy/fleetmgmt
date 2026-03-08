@@ -1,12 +1,13 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { getSession } from '@/lib/session'
 import { revalidatePath } from 'next/cache'
 
 async function requireAdmin() {
+  const session = await getSession()
+  if (!session || session.role !== 'super_admin') return null
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user || user.user_metadata?.role !== 'super_admin') return null
   return { supabase }
 }
 

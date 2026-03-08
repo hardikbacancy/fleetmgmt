@@ -1,61 +1,60 @@
-import { createServerClient } from '@supabase/ssr'
+import { jwtVerify } from 'jose'
 import { NextResponse, type NextRequest } from 'next/server'
 
+const secret = new TextEncoder().encode(process.env.JWT_SECRET!)
+
+interface SessionPayload {
+  userId: string
+  role: string
+  fleetOwnerId: string | null
+}
+
+async function getSessionFromRequest(request: NextRequest): Promise<SessionPayload | null> {
+  try {
+    const token = request.cookies.get('session')?.value
+    if (!token) return null
+    const { payload } = await jwtVerify(token, secret)
+    return payload as unknown as SessionPayload
+  } catch {
+    return null
+  }
+}
+
 export async function middleware(request: NextRequest) {
-  let supabaseResponse = NextResponse.next({ request })
-
-  const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    {
-      cookies: {
-        getAll() { return request.cookies.getAll() },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value }) => request.cookies.set(name, value))
-          supabaseResponse = NextResponse.next({ request })
-          cookiesToSet.forEach(({ name, value, options }) =>
-            supabaseResponse.cookies.set(name, value, options)
-          )
-        },
-      },
-    }
-  )
-
-  const { data: { user } } = await supabase.auth.getUser()
   const { pathname } = request.nextUrl
-
   const isPublic = pathname.startsWith('/login') || pathname.startsWith('/register')
 
-  if (!user && !isPublic) {
+  const session = await getSessionFromRequest(request)
+
+  if (!session && !isPublic) {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)
   }
 
-  if (user && isPublic) {
-    const role = user.user_metadata?.role
+  if (session && isPublic) {
     const url = request.nextUrl.clone()
-    url.pathname = role === 'super_admin' ? '/admin' : '/dashboard'
+    url.pathname = session.role === 'super_admin' ? '/admin' : '/dashboard'
     return NextResponse.redirect(url)
   }
 
-  if (user) {
-    const role = user.user_metadata?.role as string | undefined
-    if (pathname.startsWith('/admin') && role !== 'super_admin') {
+  if (session) {
+    if (pathname.startsWith('/admin') && session.role !== 'super_admin') {
       const url = request.nextUrl.clone()
       url.pathname = '/dashboard'
       return NextResponse.redirect(url)
     }
+
     const fleetRoutes = ['/dashboard', '/vehicles', '/drivers', '/customers',
       '/bookings', '/trips', '/expenses', '/reports']
-    if (fleetRoutes.some(r => pathname.startsWith(r)) && role === 'super_admin') {
+    if (fleetRoutes.some(r => pathname.startsWith(r)) && session.role === 'super_admin') {
       const url = request.nextUrl.clone()
       url.pathname = '/admin'
       return NextResponse.redirect(url)
     }
   }
 
-  return supabaseResponse
+  return NextResponse.next()
 }
 
 export const config = {

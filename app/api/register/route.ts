@@ -1,5 +1,6 @@
-import { createClient } from '@supabase/supabase-js'
+import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
+import bcrypt from 'bcryptjs'
 
 export async function POST(request: Request) {
   const body = await request.json()
@@ -9,42 +10,62 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'All required fields must be filled.' }, { status: 400 })
   }
 
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
+  const supabase = await createClient()
 
-  // Create auth user (email confirmed, no verification email)
-  const { data: authData, error: authError } = await supabase.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true,
-    user_metadata: { role: 'fleet_owner', full_name },
-  })
+  // Check email not already taken
+  const { data: existing } = await supabase
+    .from('users')
+    .select('id')
+    .eq('email', email.trim().toLowerCase())
+    .single()
 
-  if (authError) return NextResponse.json({ error: authError.message }, { status: 400 })
+  if (existing) {
+    return NextResponse.json({ error: 'An account with this email already exists.' }, { status: 400 })
+  }
 
-  const userId = authData.user.id
+  const password_hash = await bcrypt.hash(password, 12)
+
+  // Create user
+  const { data: newUser, error: userError } = await supabase
+    .from('users')
+    .insert({ email: email.trim().toLowerCase(), password_hash, full_name })
+    .select()
+    .single()
+
+  if (userError) {
+    return NextResponse.json({ error: userError.message }, { status: 400 })
+  }
+
+  // Assign fleet_owner role
+  const { data: roleRow } = await supabase
+    .from('roles')
+    .select('id')
+    .eq('name', 'fleet_owner')
+    .single()
+
+  if (roleRow) {
+    await supabase.from('user_roles').insert({ user_id: newUser.id, role_id: roleRow.id })
+  }
 
   // Create fleet_owners record (status pending until admin approves)
   const { data: fleetOwner, error: foError } = await supabase
     .from('fleet_owners')
-    .insert({ user_id: userId, company_name, phone, address: address || null, status: 'pending' })
+    .insert({ user_id: newUser.id, company_name, phone, address: address || null, status: 'pending' })
     .select()
     .single()
 
   if (foError) {
-    await supabase.auth.admin.deleteUser(userId)
+    await supabase.from('users').delete().eq('id', newUser.id)
     return NextResponse.json({ error: foError.message }, { status: 400 })
   }
 
   // Create profile
   const { error: profileError } = await supabase
     .from('profiles')
-    .insert({ id: userId, email, full_name, role: 'fleet_owner', fleet_owner_id: fleetOwner.id })
+    .insert({ id: newUser.id, email: newUser.email, full_name, role: 'fleet_owner', fleet_owner_id: fleetOwner.id })
 
   if (profileError) {
-    await supabase.auth.admin.deleteUser(userId)
+    await supabase.from('users').delete().eq('id', newUser.id)
     return NextResponse.json({ error: profileError.message }, { status: 400 })
   }
 

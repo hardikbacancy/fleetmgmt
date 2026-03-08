@@ -1,30 +1,24 @@
 import { createClient } from './supabase/server'
+import { getSession } from './session'
 
 export async function getProfile() {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return null
+  const session = await getSession()
+  if (!session) return null
 
+  const supabase = await createClient()
   const { data: profile } = await supabase
     .from('profiles')
     .select('*, fleet_owners(*)')
-    .eq('id', user.id)
+    .eq('id', session.userId)
     .single()
 
   return profile
 }
 
 export async function getFleetContext() {
+  const session = await getSession()
+  if (!session || !session.fleetOwnerId) return null
+
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return null
-
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('fleet_owner_id, role')
-    .eq('id', user.id)
-    .single()
-
-  if (!profile?.fleet_owner_id) return null
-  return { supabase, fleetOwnerId: profile.fleet_owner_id, role: profile.role }
+  return { supabase, fleetOwnerId: session.fleetOwnerId, role: session.role }
 }

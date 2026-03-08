@@ -1,27 +1,25 @@
+import { getSession } from '@/lib/session'
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import Sidebar from '@/components/Sidebar'
 import { logout } from '@/app/actions/auth'
 
 export default async function FleetLayout({ children }: { children: React.ReactNode }) {
+  const session = await getSession()
+  if (!session) redirect('/login')
+  if (session.role === 'super_admin') redirect('/admin')
+
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) redirect('/login')
-
-  const role = user.user_metadata?.role
-  if (role === 'super_admin') redirect('/admin')
-
   const { data: profile } = await supabase
     .from('profiles')
     .select('*, fleet_owners(*)')
-    .eq('id', user.id)
+    .eq('id', session.userId)
     .single()
 
   if (!profile || !profile.fleet_owner_id) redirect('/login')
 
   const fleetOwner = (profile as { fleet_owners?: { company_name?: string; status?: string } }).fleet_owners
 
-  // Pending state
   if (fleetOwner?.status === 'pending') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
@@ -42,7 +40,6 @@ export default async function FleetLayout({ children }: { children: React.ReactN
     )
   }
 
-  // Inactive state
   if (fleetOwner?.status === 'inactive') {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">

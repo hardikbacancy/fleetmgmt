@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install bcryptjs jose @types/bcryptjs)",
+      "Bash(npm list server-only)",
+      "Bash(npm install server-only)"
+    ]
+  }
+}
